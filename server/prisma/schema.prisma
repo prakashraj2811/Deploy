@@ -1,0 +1,759 @@
+// Matrimony Platform — Core Database Schema (Phase 1)
+// Covers: RBAC, Users/Profiles, Lookups, Search-relevant fields,
+// Interests/Shortlists, Subscriptions (schema only, billing logic in Phase 2),
+// Notifications, Audit Logs, Sessions.
+// Additional Phase-2+ domains (chat, support tickets, reports, CMS, blogs)
+// are modeled with minimal stub tables so relations/FKs are stable from day one.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC
+// ---------------------------------------------------------------------------
+
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique // super_admin, admin, support, user, moderator, ...
+  label       String
+  description String?
+  isSystem    Boolean  @default(false) // system roles cannot be deleted
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  permissions RolePermission[]
+  users       UserRole[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @default(uuid())
+  key         String   @unique // e.g. users.view, payments.refund
+  module      String // users, profiles, payments, subscriptions, reports, support, settings...
+  description String?
+  createdAt   DateTime @default(now())
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+// ---------------------------------------------------------------------------
+// USERS / AUTH
+// ---------------------------------------------------------------------------
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  BLOCKED
+  DEACTIVATED
+  DELETED
+}
+
+model User {
+  id                String        @id @default(uuid())
+  email             String        @unique
+  mobile            String        @unique
+  passwordHash      String
+  status            AccountStatus @default(ACTIVE)
+  emailVerifiedAt   DateTime?
+  mobileVerifiedAt  DateTime?
+  failedLoginCount  Int           @default(0)
+  lockedUntil       DateTime?
+  lastLoginAt       DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  deletedAt         DateTime?
+
+  roles             UserRole[]
+  profile           Profile?
+  otps              OtpCode[]
+  sessions          LoginSession[]
+  notifications     Notification[]
+  notificationPrefs NotificationPreference?
+  sentInterests     Interest[]              @relation("InterestSender")
+  receivedInterests Interest[]              @relation("InterestReceiver")
+  shortlistsMade    Shortlist[]             @relation("ShortlistOwner")
+  shortlistedBy     Shortlist[]             @relation("ShortlistTarget")
+  subscriptions     UserSubscription[]
+  payments          Payment[]
+  reportsFiled      Report[]                @relation("ReportFiledBy")
+  reportsAgainst    Report[]                @relation("ReportAgainstUser")
+  supportTickets    SupportTicket[]
+  auditLogs         AuditLog[]
+  profileViewsMade  ProfileView[]           @relation("ViewerUser")
+  profileViewsRecv  ProfileView[]           @relation("ViewedUser")
+
+  @@map("users")
+}
+
+enum OtpPurpose {
+  REGISTRATION_MOBILE
+  REGISTRATION_EMAIL
+  LOGIN
+  PASSWORD_RESET
+}
+
+model OtpCode {
+  id        String     @id @default(uuid())
+  userId    String?
+  identifier String    // email or mobile the OTP was sent to
+  codeHash  String
+  purpose   OtpPurpose
+  expiresAt DateTime
+  consumedAt DateTime?
+  attempts  Int        @default(0)
+  createdAt DateTime   @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([identifier, purpose])
+  @@map("otp_codes")
+}
+
+model LoginSession {
+  id           String    @id @default(uuid())
+  userId       String
+  refreshToken String    @unique
+  userAgent    String?
+  ipAddress    String?
+  createdAt    DateTime  @default(now())
+  expiresAt    DateTime
+  revokedAt    DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("login_sessions")
+}
+
+// ---------------------------------------------------------------------------
+// LOOKUP / MASTER DATA
+// ---------------------------------------------------------------------------
+
+model Religion {
+  id         String       @id @default(uuid())
+  name       String       @unique
+  communities Community[]
+  profiles    Profile[]
+
+  @@map("religions")
+}
+
+model Community {
+  id         String    @id @default(uuid())
+  name       String
+  religionId String
+  religion   Religion  @relation(fields: [religionId], references: [id])
+  castes     Caste[]
+  profiles   Profile[]
+
+  @@unique([religionId, name])
+  @@map("communities")
+}
+
+model Caste {
+  id          String    @id @default(uuid())
+  name        String
+  communityId String
+  community   Community @relation(fields: [communityId], references: [id])
+  profiles    Profile[]
+
+  @@unique([communityId, name])
+  @@map("castes")
+}
+
+model Location {
+  id       String     @id @default(uuid())
+  country  String
+  state    String
+  city     String
+  profiles Profile[]
+
+  @@unique([country, state, city])
+  @@map("locations")
+}
+
+// ---------------------------------------------------------------------------
+// PROFILE
+// ---------------------------------------------------------------------------
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum MaritalStatus {
+  NEVER_MARRIED
+  DIVORCED
+  WIDOWED
+  AWAITING_DIVORCE
+}
+
+enum ProfileStatus {
+  DRAFT
+  PENDING_VERIFICATION
+  VERIFIED
+  REJECTED
+  SUSPENDED
+  BLOCKED
+}
+
+enum FoodPreference {
+  VEGETARIAN
+  NON_VEGETARIAN
+  EGGETARIAN
+  VEGAN
+}
+
+enum HabitLevel {
+  NEVER
+  OCCASIONALLY
+  REGULARLY
+}
+
+enum FamilyType {
+  NUCLEAR
+  JOINT
+}
+
+enum FamilyStatus {
+  MIDDLE_CLASS
+  UPPER_MIDDLE_CLASS
+  RICH
+  AFFLUENT
+}
+
+model Profile {
+  id                String        @id @default(uuid())
+  userId            String        @unique
+  user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fullName          String
+  gender            Gender
+  dateOfBirth       DateTime
+  maritalStatus     MaritalStatus
+  heightCm          Int?
+  weightKg          Int?
+  motherTongue      String?
+
+  religionId        String?
+  religion          Religion?     @relation(fields: [religionId], references: [id])
+  communityId       String?
+  community         Community?    @relation(fields: [communityId], references: [id])
+  casteId           String?
+  caste             Caste?        @relation(fields: [casteId], references: [id])
+
+  locationId        String?
+  location          Location?     @relation(fields: [locationId], references: [id])
+
+  highestQualification String?
+  college              String?
+  fieldOfStudy         String?
+
+  occupation        String?
+  company           String?
+  jobTitle          String?
+  annualIncome      Int?
+  workLocation      String?
+
+  familyType        FamilyType?
+  familyStatus      FamilyStatus?
+  familyLocation    String?
+  fatherDetails     String?
+  motherDetails     String?
+  siblingsDetails   String?
+
+  foodPreference    FoodPreference?
+  smoking           HabitLevel?
+  drinking          HabitLevel?
+  hobbies           String[]      @default([])
+  interests         String[]      @default([])
+
+  aboutMe           String?
+
+  status            ProfileStatus @default(DRAFT)
+  completionPercent Int           @default(0)
+  isPrimaryPhotoSet Boolean       @default(false)
+
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  photos            ProfilePhoto[]
+  preference        PartnerPreference?
+  privacy           PrivacySettings?
+  verifications     VerificationRequest[]
+
+  @@index([gender, maritalStatus, status])
+  @@index([religionId, communityId, casteId])
+  @@map("profiles")
+}
+
+enum PhotoVisibility {
+  EVERYONE
+  REGISTERED_USERS
+  ACCEPTED_CONNECTIONS
+  PREMIUM_MEMBERS
+  PRIVATE
+}
+
+model ProfilePhoto {
+  id         String           @id @default(uuid())
+  profileId  String
+  profile    Profile          @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  url        String
+  isPrimary  Boolean          @default(false)
+  visibility PhotoVisibility  @default(REGISTERED_USERS)
+  isBlurred  Boolean          @default(false)
+  sortOrder  Int              @default(0)
+  approved   Boolean          @default(false)
+  createdAt  DateTime         @default(now())
+
+  @@map("profile_photos")
+}
+
+model PartnerPreference {
+  id               String   @id @default(uuid())
+  profileId        String   @unique
+  profile          Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  minAge           Int?
+  maxAge           Int?
+  minHeightCm      Int?
+  maxHeightCm      Int?
+  religionIds      String[] @default([])
+  communityIds     String[] @default([])
+  educationLevels  String[] @default([])
+  occupations      String[] @default([])
+  minIncome        Int?
+  locations        String[] @default([])
+  maritalStatuses  String[] @default([])
+  foodPreferences  String[] @default([])
+
+  updatedAt        DateTime @updatedAt
+
+  @@map("partner_preferences")
+}
+
+enum VisibilityLevel {
+  EVERYONE
+  REGISTERED_USERS
+  ACCEPTED_CONNECTIONS
+  PREMIUM_MEMBERS
+  NOBODY
+}
+
+model PrivacySettings {
+  id                 String          @id @default(uuid())
+  profileId          String          @unique
+  profile            Profile         @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  profileVisibility  VisibilityLevel @default(REGISTERED_USERS)
+  photoVisibility    VisibilityLevel @default(REGISTERED_USERS)
+  whoCanSendInterest VisibilityLevel @default(EVERYONE)
+  whoCanMessage      VisibilityLevel @default(ACCEPTED_CONNECTIONS)
+  showPhone          VisibilityLevel @default(ACCEPTED_CONNECTIONS)
+  showEmail          VisibilityLevel @default(NOBODY)
+
+  updatedAt          DateTime        @updatedAt
+
+  @@map("privacy_settings")
+}
+
+enum VerificationType {
+  MOBILE
+  EMAIL
+  IDENTITY
+  PHOTO
+  PROFILE
+}
+
+enum VerificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  NEEDS_INFO
+}
+
+model VerificationRequest {
+  id          String              @id @default(uuid())
+  profileId   String
+  profile     Profile             @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  type        VerificationType
+  status      VerificationStatus  @default(PENDING)
+  documentUrl String?
+  reviewedBy  String?
+  reviewNote  String?
+  createdAt   DateTime            @default(now())
+  reviewedAt  DateTime?
+
+  @@map("verification_requests")
+}
+
+model ProfileView {
+  id         String   @id @default(uuid())
+  viewerId   String
+  viewedId   String
+  viewer     User     @relation("ViewerUser", fields: [viewerId], references: [id], onDelete: Cascade)
+  viewed     User     @relation("ViewedUser", fields: [viewedId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@index([viewedId])
+  @@map("profile_views")
+}
+
+// ---------------------------------------------------------------------------
+// INTERESTS / SHORTLISTS
+// ---------------------------------------------------------------------------
+
+enum InterestStatus {
+  SENT
+  ACCEPTED
+  DECLINED
+  WITHDRAWN
+}
+
+model Interest {
+  id         String         @id @default(uuid())
+  senderId   String
+  receiverId String
+  status     InterestStatus @default(SENT)
+  sender     User           @relation("InterestSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver   User           @relation("InterestReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  @@unique([senderId, receiverId])
+  @@map("interests")
+}
+
+model Shortlist {
+  id        String   @id @default(uuid())
+  ownerId   String
+  targetId  String
+  category  String   @default("Favorites")
+  owner     User     @relation("ShortlistOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  target    User     @relation("ShortlistTarget", fields: [targetId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([ownerId, targetId])
+  @@map("shortlists")
+}
+
+// ---------------------------------------------------------------------------
+// SUBSCRIPTIONS / PAYMENTS (schema now, billing logic Phase 2)
+// ---------------------------------------------------------------------------
+
+model SubscriptionPlan {
+  id            String   @id @default(uuid())
+  name          String   @unique
+  slug          String   @unique
+  tagline       String?
+  priceCents    Int
+  currency      String   @default("INR")
+  durationDays  Int
+  features      String[] @default([])
+  maxInterests  Int?
+  maxSearches   Int?
+  isActive      Boolean  @default(true)
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  userSubscriptions UserSubscription[]
+
+  @@map("subscription_plans")
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+  PENDING
+}
+
+model UserSubscription {
+  id        String             @id @default(uuid())
+  userId    String
+  planId    String
+  status    SubscriptionStatus @default(PENDING)
+  startedAt DateTime?
+  expiresAt DateTime?
+  createdAt DateTime           @default(now())
+
+  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan    SubscriptionPlan @relation(fields: [planId], references: [id])
+  payment Payment?
+
+  @@map("user_subscriptions")
+}
+
+enum PaymentStatus {
+  CREATED
+  SUCCESS
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+model Payment {
+  id                  String        @id @default(uuid())
+  userId              String
+  userSubscriptionId  String?       @unique
+  provider            String        @default("razorpay")
+  providerOrderId     String?
+  providerPaymentId   String?
+  amountCents         Int
+  currency            String        @default("INR")
+  status              PaymentStatus @default(CREATED)
+  rawPayload          Json?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userSubscription UserSubscription?  @relation(fields: [userSubscriptionId], references: [id])
+  invoice          Invoice?
+
+  @@map("payments")
+}
+
+model Invoice {
+  id            String   @id @default(uuid())
+  paymentId     String   @unique
+  invoiceNumber String   @unique
+  amountCents   Int
+  taxCents      Int      @default(0)
+  discountCents Int      @default(0)
+  totalCents    Int
+  pdfUrl        String?
+  createdAt     DateTime @default(now())
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@map("invoices")
+}
+
+// ---------------------------------------------------------------------------
+// NOTIFICATIONS
+// ---------------------------------------------------------------------------
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  SMS
+  PUSH
+}
+
+model Notification {
+  id        String               @id @default(uuid())
+  userId    String
+  type      String
+  title     String
+  body      String
+  channel   NotificationChannel  @default(IN_APP)
+  readAt    DateTime?
+  createdAt DateTime             @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  id                 String  @id @default(uuid())
+  userId             String  @unique
+  user               User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emailEnabled       Boolean @default(true)
+  smsEnabled         Boolean @default(true)
+  pushEnabled        Boolean @default(true)
+  interestAlerts     Boolean @default(true)
+  messageAlerts      Boolean @default(true)
+  marketingEmails    Boolean @default(false)
+
+  @@map("notification_preferences")
+}
+
+// ---------------------------------------------------------------------------
+// REPORTS / SUPPORT (stub tables — full workflow in later phase)
+// ---------------------------------------------------------------------------
+
+enum ReportReason {
+  FAKE_PROFILE
+  SCAM
+  HARASSMENT
+  INAPPROPRIATE_CONTENT
+  WRONG_INFORMATION
+  SPAM
+  ABUSE
+  OTHER
+}
+
+enum ReportStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+  DISMISSED
+}
+
+model Report {
+  id           String       @id @default(uuid())
+  filedById    String
+  againstId    String
+  reason       ReportReason
+  details      String?
+  status       ReportStatus @default(OPEN)
+  assignedTo   String?
+  resolution   String?
+  createdAt    DateTime     @default(now())
+  resolvedAt   DateTime?
+
+  filedBy User @relation("ReportFiledBy", fields: [filedById], references: [id], onDelete: Cascade)
+  against User @relation("ReportAgainstUser", fields: [againstId], references: [id], onDelete: Cascade)
+
+  @@map("reports")
+}
+
+enum TicketStatus {
+  OPEN
+  ASSIGNED
+  IN_PROGRESS
+  WAITING_FOR_CUSTOMER
+  RESOLVED
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model SupportTicket {
+  id         String         @id @default(uuid())
+  userId     String
+  subject    String
+  status     TicketStatus   @default(OPEN)
+  priority   TicketPriority @default(MEDIUM)
+  assignedTo String?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  user     User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages SupportTicketMessage[]
+
+  @@map("support_tickets")
+}
+
+model SupportTicketMessage {
+  id         String        @id @default(uuid())
+  ticketId   String
+  senderId   String
+  body       String
+  isInternal Boolean       @default(false)
+  createdAt  DateTime      @default(now())
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@map("support_ticket_messages")
+}
+
+// ---------------------------------------------------------------------------
+// CHAT / MESSAGING
+// ---------------------------------------------------------------------------
+
+model Conversation {
+  id            String    @id @default(uuid())
+  userAId       String
+  userBId       String
+  lastMessageAt DateTime?
+  createdAt     DateTime  @default(now())
+
+  messages Message[]
+
+  @@unique([userAId, userBId])
+  @@map("conversations")
+}
+
+model Message {
+  id             String       @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String
+  body           String
+  attachmentUrl  String?
+  readAt         DateTime?
+  deletedAt      DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+// ---------------------------------------------------------------------------
+// AUDIT / SYSTEM
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  action     String
+  entity     String?
+  entityId   String?
+  oldValue   Json?
+  newValue   Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entity, entityId])
+  @@map("audit_logs")
+}
+
+model SystemSetting {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("system_settings")
+}
+
+model FeatureFlag {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  enabled   Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+
+  @@map("feature_flags")
+}
